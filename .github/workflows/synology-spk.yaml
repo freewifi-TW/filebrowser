@@ -108,6 +108,8 @@ jobs:
           cp overlay/backend/cmd/synology_thumbs.go src/backend/cmd/
           rm -rf src/backend/internal/synothumb
           cp -r overlay/backend/internal/synothumb src/backend/internal/
+          # Translation corrections (skipped per key when upstream changed it).
+          node overlay/synology/apply-i18n-overrides.cjs src/frontend/src/i18n
 
       - name: Versions
         id: ver

@@ -8,6 +8,7 @@
 | `backend/internal/synothumb/` | 把影片縮圖寫入 Synology `@eaDir` 的產生器（只用標準函式庫 + ffmpeg） |
 | `backend/cmd/synology_thumbs.go` | 啟動掛勾（設 `FILEBROWSER_SYNOLOGY_THUMBNAILS=true` 才會啟用） |
 | `.github/workflows/synology-spk.yaml` | 自動跟上游、建置並發佈 `.spk` |
+| `synology/i18n/*.overrides.json` | 介面翻譯修正（目前只有繁體中文），建置時套用到上游的語系檔 |
 
 ## 套件內容
 
@@ -156,3 +157,11 @@ synology/build-spk.sh --arch amd64 --version 2.1.5-0001 --upstream-tag v2.1.5-be
 ```
 
 請在 Linux（或 WSL）上執行；在 Windows 的 Git Bash 上打包出來的檔案會沒有執行權限。
+
+## 繁體中文翻譯修正
+
+上游的 `zh-tw.json` 有不少機器翻譯造成的錯誤（例如「Enforce」譯成「執行」、「Share management」譯成「股份管理」、「Minutes」譯成「會議紀錄」），也有幾條尚未翻譯。修正內容放在 `synology/i18n/zh-tw.overrides.json`，格式是「鍵的路徑 → 修正後的文字」。
+
+- 建置時由 `synology/apply-i18n-overrides.cjs` 套用到上游的語系檔，不直接修改上游檔案，所以不會有合併衝突。
+- 上游若刪除某個鍵，或該鍵的 `{佔位符}` 與英文原文不再一致，該條修正會自動略過，不會讓建置失敗。
+- 要新增或調整翻譯，直接編輯那個 JSON 檔，並在 commit 訊息加上 `[rebuild]` 重新打包。
