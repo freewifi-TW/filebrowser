@@ -2,13 +2,13 @@
   "packages": [
     {
       "package": "FileBrowserQuantum",
-      "version": "2.0.2-0009",
+      "version": "2.0.2-0010",
       "dname": "FileBrowser Quantum",
       "desc": "FileBrowser Quantum v2.0.2-stable: web file manager with bundled FFmpeg. Writes video thumbnails for File Station, Synology Drive and Synology Photos.",
-      "link": "https://github.com/freewifi-TW/filebrowser/releases/download/v2.0.2-stable-syno.9/FileBrowserQuantum-aarch64-2.0.2-0009.spk",
-      "md5": "f09ed7ca3d09b3881990c65c3d6f1cc9",
+      "link": "https://github.com/freewifi-TW/filebrowser/releases/download/v2.0.2-stable-syno.10/FileBrowserQuantum-aarch64-2.0.2-0010.spk",
+      "md5": "dbf63e30d32fdd3efd8aeca1c14fb0bd",
       "size": 87408640,
-      "changelog": "https://github.com/freewifi-TW/filebrowser/releases/tag/v2.0.2-stable-syno.9",
+      "changelog": "https://github.com/freewifi-TW/filebrowser/releases/tag/v2.0.2-stable-syno.10",
       "thumbnail": [
         "https://raw.githubusercontent.com/freewifi-TW/filebrowser/gh-pages/icon_72.png",
         "https://raw.githubusercontent.com/freewifi-TW/filebrowser/gh-pages/icon_120.png"
