@@ -351,7 +351,7 @@ func (g *Generator) Generate(ctx context.Context, videoPath string, videoMtime t
 	}
 	for _, t := range todo {
 		tmp := filepath.Join(dir, tmpPrefix+t.Name)
-		if err := g.runFFmpeg(ctx, "-i", frame, "-vf", scaleFilter(t), "-q:v", "3", "-f", "mjpeg", tmp); err != nil {
+		if err := g.runFFmpeg(ctx, "-protocol_whitelist", "file", "-i", frame, "-vf", scaleFilter(t), "-q:v", "3", "-f", "mjpeg", tmp); err != nil {
 			os.Remove(tmp)
 			return fmt.Errorf("resize to %s: %w", t.Name, err)
 		}
@@ -377,15 +377,27 @@ func (g *Generator) Generate(ctx context.Context, videoPath string, videoMtime t
 
 // mkdirAllOpen creates "@eaDir" and the per-file directory world-writable like DSM
 // does, so that Synology's own services can keep using them.
+//
+// Both must be real directories: anyone who can write to the folder could otherwise
+// plant a symlink there and make this process write thumbnails (and delete "*.fail"
+// files) in a directory of their choosing.
 func mkdirAllOpen(dir string) error {
 	for _, d := range []string{filepath.Dir(dir), dir} {
-		if err := os.Mkdir(d, 0o777); err != nil {
-			if errors.Is(err, fs.ErrExist) {
-				continue
-			}
+		err := os.Mkdir(d, 0o777)
+		if err == nil {
+			_ = os.Chmod(d, 0o777) // undo umask for directories we just created
+			continue
+		}
+		if !errors.Is(err, fs.ErrExist) {
 			return err
 		}
-		_ = os.Chmod(d, 0o777) // undo umask for directories we just created
+		st, err := os.Lstat(d)
+		if err != nil {
+			return err
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("%s is not a directory (symlink?), refusing to write there", d)
+		}
 	}
 	return nil
 }
@@ -403,6 +415,8 @@ func (g *Generator) extractFrame(ctx context.Context, videoPath, dst string, siz
 		args = append(args, "-ss", strconv.FormatFloat(seek, 'f', 3, 64))
 	}
 	args = append(args,
+		// Local files only: a crafted "video" (e.g. a playlist) must not make ffmpeg fetch URLs.
+		"-protocol_whitelist", "file",
 		"-i", videoPath,
 		"-map", "0:v:0", "-an", "-sn", "-dn",
 		"-frames:v", "1",
@@ -445,7 +459,7 @@ func (g *Generator) seekSeconds(ctx context.Context, videoPath string) float64 {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, g.cfg.FFprobePath,
-		"-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath).Output()
+		"-v", "error", "-protocol_whitelist", "file", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", videoPath).Output()
 	if err != nil {
 		return 0
 	}

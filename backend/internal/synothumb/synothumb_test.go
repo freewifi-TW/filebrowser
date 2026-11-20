@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,5 +225,27 @@ func TestGenerateWithRealFFmpeg(t *testing.T) {
 	}
 	if again := g.ScanOnce(context.Background()); again.UpToDate != 1 || again.Generated != 0 {
 		t.Fatalf("second scan stats = %+v", again)
+	}
+}
+
+// A planted "@eaDir" symlink must not redirect thumbnail writes elsewhere.
+func TestGenerateRefusesSymlinkedThumbDir(t *testing.T) {
+	root := t.TempDir()
+	victim := t.TempDir()
+	video := filepath.Join(root, "clip.mp4")
+	writeFile(t, video, time.Now().Add(-time.Hour))
+	if err := os.Symlink(victim, filepath.Join(root, "@eaDir")); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	g, err := New(Config{FFmpegPath: "ffmpeg-that-does-not-exist", Roots: []string{root}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = g.Generate(context.Background(), video, time.Now().Add(-time.Hour))
+	if err == nil || !strings.Contains(err.Error(), "refusing") {
+		t.Fatalf("expected a refusal, got %v", err)
+	}
+	if entries, _ := os.ReadDir(victim); len(entries) != 0 {
+		t.Fatalf("wrote into the symlink target: %v", entries)
 	}
 }

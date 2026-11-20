@@ -34,8 +34,11 @@ on:
       - "backend/internal/web/synology_playable.go"
       - ".github/workflows/synology-spk.yaml"
 
+# Least privilege: the build job runs third-party code (npm packages, Go modules,
+# upstream build scripts, Docker images) and therefore only gets a read-only token.
+# Only the small "release" and "catalog" jobs may write.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: synology-spk
@@ -93,16 +96,18 @@ jobs:
         tag: ${{ fromJSON(needs.resolve.outputs.tags) }}
     steps:
       - name: Checkout fork overlay
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: overlay
+          persist-credentials: false
 
       - name: Checkout upstream ${{ matrix.tag }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ env.UPSTREAM_REPO }}
           ref: ${{ matrix.tag }}
           path: src
+          persist-credentials: false
 
       - name: Apply overlay
         run: |
@@ -128,6 +133,8 @@ jobs:
           build="$(printf '%04d' "${GITHUB_RUN_NUMBER}")"
           ffmpeg_image="$(sed -nE 's/^FROM[[:space:]]+([^[:space:]]*ffmpeg[^[:space:]]*)[[:space:]]+AS[[:space:]]+ffmpeg.*/\1/Ip' src/_docker/Dockerfile | head -n1)"
           [ -n "${ffmpeg_image}" ] || { echo "::error::could not find the ffmpeg image in upstream _docker/Dockerfile"; exit 1; }
+          # The image name comes from an upstream file: validate it before anything uses it.
+          echo "${ffmpeg_image}" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/:-]*$' || { echo "::error::unexpected characters in the ffmpeg image name"; exit 1; }
           {
             echo "spk_version=${base}-${build}"
             echo "channel=${channel}"
@@ -136,7 +143,7 @@ jobs:
             echo "upstream_sha=$(git -C src rev-parse --short HEAD)"
           } | tee -a "${GITHUB_OUTPUT}"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: src/frontend/.nvmrc
 
@@ -144,12 +151,12 @@ jobs:
         working-directory: src/frontend
         run: npm i && npm run build
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: src/backend/go.mod
           cache-dependency-path: src/backend/go.sum
 
-      - uses: goto-bus-stop/setup-zig@v2
+      - uses: goto-bus-stop/setup-zig@abea47f85e598557f500fa1fd2ab7464fcb39406 # v2.2.1
 
       - name: Build static backend binaries (same flags as upstream .goreleaser.yaml)
         working-directory: src/backend
@@ -172,15 +179,17 @@ jobs:
             if readelf -lW "${f}" | grep -q INTERP; then echo "::error::${f} is not statically linked"; exit 1; fi
           done
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Fetch ffmpeg/ffprobe (the build upstream ships in its Docker image)
+        env:
+          FFMPEG_IMAGE: ${{ steps.ver.outputs.ffmpeg_image }}
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do
             # Upstream ships the decode-only build; video conversion needs the full build of the
             # same version (with the libx264/aac encoders). Fall back to upstream's if it is missing.
-            image="${{ steps.ver.outputs.ffmpeg_image }}"
+            image="${FFMPEG_IMAGE}"
             full="${image%-decode}"
             if [ "${full}" != "${image}" ] && docker pull -q --platform "linux/${arch}" "${full}"; then
               image="${full}"
@@ -249,22 +258,15 @@ jobs:
           mkdir check/target && tar -xzf check/package.tgz -C check/target && jq -e . check/target/ui/config > /dev/null
           (cd out && sha256sum *.spk > SHA256SUMS.txt)
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: spk-${{ matrix.tag }}
-          path: out/
-          if-no-files-found: error
-
-      - name: Publish release
-        if: github.event_name != 'workflow_dispatch' || inputs.publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        working-directory: overlay
+      - name: Release notes and metadata
         run: |
           set -euo pipefail
-          prerelease=""
-          [ "${{ steps.ver.outputs.channel }}" = "stable" ] || prerelease="--prerelease"
-          cat > ../notes.md <<EOF
+          mkdir -p meta
+          {
+            echo "release_tag=${{ steps.ver.outputs.release_tag }}"
+            echo "channel=${{ steps.ver.outputs.channel }}"
+          } > meta/release.env
+          cat > meta/notes.md <<EOF
           Synology DSM 7.2+ package of FileBrowser Quantum **${{ matrix.tag }}** with bundled FFmpeg.
 
           - Upstream release notes: https://github.com/${UPSTREAM_REPO}/releases/tag/${{ matrix.tag }}
@@ -281,24 +283,62 @@ jobs:
 
           Install or update: Package Center → Manual Install → pick the .spk. See \`synology/README.md\`.
           EOF
-          sed -i 's/^          //' ../notes.md
-          gh release create "${{ steps.ver.outputs.release_tag }}" ../out/*.spk ../out/SHA256SUMS.txt \
-            --target "${GITHUB_SHA}" \
-            --title "FileBrowser Quantum ${{ matrix.tag }} for Synology (build ${GITHUB_RUN_NUMBER})" \
-            --notes-file ../notes.md ${prerelease}
+          sed -i 's/^          //' meta/notes.md
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: spk-${{ matrix.tag }}
+          path: |
+            out/
+            meta/
+          if-no-files-found: error
+
+  release:
+    name: Publish ${{ matrix.tag }}
+    # Separate from the build on purpose: this job holds the write token but runs no
+    # third-party code - it only uploads the files the build produced.
+    needs: [resolve, build]
+    if: github.event_name != 'workflow_dispatch' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.resolve.outputs.tags) }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: spk-${{ matrix.tag }}
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ matrix.tag }}
+        run: |
+          set -euo pipefail
+          release_tag="$(sed -n 's/^release_tag=//p' meta/release.env)"
+          channel="$(sed -n 's/^channel=//p' meta/release.env)"
+          echo "${release_tag}" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+-(stable|beta)-syno.[0-9]+$' || { echo "::error::unexpected release tag"; exit 1; }
+          (cd out && sha256sum -c SHA256SUMS.txt)
+          prerelease=""
+          [ "${channel}" = "stable" ] || prerelease="--prerelease"
+          gh release create "${release_tag}" out/*.spk out/SHA256SUMS.txt             --repo "${GITHUB_REPOSITORY}"             --target "${GITHUB_SHA}"             --title "FileBrowser Quantum ${UPSTREAM_TAG} for Synology (build ${GITHUB_RUN_NUMBER})"             --notes-file meta/notes.md ${prerelease}
 
   catalog:
     name: Update Package Center source
     # A static "package source" for DSM (Package Center > Settings > Package Sources),
     # published on the gh-pages branch. One file per CPU family and channel because a
     # static host cannot filter by the architecture DSM sends in its query.
-    needs: [resolve, build]
-    if: always() && needs.resolve.result == 'success' && needs.build.result != 'failure' && needs.build.result != 'cancelled'
+    needs: [resolve, build, release]
+    if: always() && needs.resolve.result == 'success' && needs.build.result != 'failure' && needs.build.result != 'cancelled' && needs.release.result != 'failure'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           sparse-checkout: frontend/public/img/icons
+          persist-credentials: false
       - name: Generate catalog
         env:
           GH_TOKEN: ${{ github.token }}

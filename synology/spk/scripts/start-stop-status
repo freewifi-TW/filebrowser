@@ -103,6 +103,8 @@ start() {
         set +a
     fi
     mkdir -p "${TMPDIR}" "${PKG_VAR}/cache"
+    # The database (password hashes, tokens), log and caches live here: package user only.
+    chmod 700 "${PKG_VAR}" 2>/dev/null
     write_config || return 1
 
     cd "${PKG_VAR}" || return 1
@@ -121,6 +123,22 @@ start() {
         fi
         i=$((i + 1))
     done
+    retire_admin_password
+    return 0
+}
+
+# FILEBROWSER_ADMIN_PASSWORD makes FileBrowser reset the admin password to that value
+# on EVERY start. Left in place it would undo a password changed in the web interface
+# and keep the installation password valid forever, so it is a one-shot: once a start
+# has applied it, the line is removed from the environment file.
+retire_admin_password() {
+    [ -f "${ENV_FILE}" ] && [ -f "${PKG_VAR}/database.sqlite" ] || return 0
+    grep -q '^FILEBROWSER_ADMIN_PASSWORD=' "${ENV_FILE}" || return 0
+    (
+        umask 077
+        sed 's|^FILEBROWSER_ADMIN_PASSWORD=.*|# (applied and removed) To reset the admin password: add a line\n#   FILEBROWSER_ADMIN_PASSWORD="new password"\n# and restart the package. The line is removed again after it was applied.|' \
+            "${ENV_FILE}" > "${ENV_FILE}.tmp" && mv -f "${ENV_FILE}.tmp" "${ENV_FILE}"
+    )
     return 0
 }
 

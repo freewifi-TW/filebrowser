@@ -82,9 +82,11 @@ func New(cfg Config) (*Manager, error) {
 	if cfg.CacheDir == "" {
 		return nil, errors.New("synoplay: cache directory is required")
 	}
-	if err := os.MkdirAll(cfg.CacheDir, 0o755); err != nil {
+	// Private: converted copies must not be readable by other local accounts.
+	if err := os.MkdirAll(cfg.CacheDir, 0o700); err != nil {
 		return nil, fmt.Errorf("synoplay: %w", err)
 	}
+	_ = os.Chmod(cfg.CacheDir, 0o700)
 	if len(cfg.Extensions) == 0 {
 		cfg.Extensions = DefaultExtensions
 	}
@@ -252,7 +254,7 @@ func (m *Manager) convertFile(src, partial, final string) error {
 	tmp := strings.TrimSuffix(final, finalSuffix) + tmpSuffix
 	out, remuxErr := m.run(ctx, m.cfg.FFmpegPath,
 		"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-		"-i", partial, "-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp)
+		"-protocol_whitelist", "file", "-i", partial, "-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", tmp)
 	if remuxErr == nil && fileReady(tmp, 1) {
 		if err := os.Rename(tmp, final); err != nil {
 			return err
@@ -273,7 +275,7 @@ func (m *Manager) probe(ctx context.Context, src string) (video, audio string) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := m.run(ctx, m.cfg.FFprobePath,
-		"-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "csv=p=0", src)
+		"-v", "error", "-protocol_whitelist", "file", "-show_entries", "stream=codec_type,codec_name", "-of", "csv=p=0", src)
 	if err != nil {
 		return "", ""
 	}
@@ -294,7 +296,8 @@ func (m *Manager) probe(ctx context.Context, src string) (video, audio string) {
 }
 
 func (m *Manager) encode(ctx context.Context, src, dst string, copyVideo, copyAudio, hasAudio bool) error {
-	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", src, "-map", "0:v:0"}
+	// Local files only: a crafted "video" (e.g. a playlist) must not make ffmpeg fetch URLs.
+	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-protocol_whitelist", "file", "-i", src, "-map", "0:v:0"}
 	if hasAudio {
 		args = append(args, "-map", "0:a:0")
 	} else {

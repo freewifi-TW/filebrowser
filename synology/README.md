@@ -199,3 +199,13 @@ synology/build-spk.sh --arch amd64 --version 2.1.5-0001 --upstream-tag v2.1.5-be
 
 - **FFmpeg 換成完整版**：上游 Docker 映像檔用的是只能解碼的精簡版（`…-decode`），沒有編碼器。套件改取同一版本號的完整版（含 libx264，屬 GPL 授權），每個 `.spk` 因此大約多 40 MB。完整版若不存在，建置會退回精簡版並發出警告，該版就沒有轉換功能。
 - **需要在上游程式碼插入一行**：`synology/apply-source-patches.sh` 在建置時於 `backend/internal/web/stream.go` 的 `ServeSingleFile` 插入一行呼叫。這個 fork 的 git 歷史裡仍然沒有修改任何上游檔案；上游若改動了那個位置，掛勾會被略過並發出警告，該版沒有轉換功能但建置不會失敗。
+
+## 安全性說明
+
+- **管理員密碼**：安裝時產生的隨機密碼只在第一次啟動時套用，套用後會從 `environment` 檔移除，之後以你在網頁介面設定的密碼為準。要重設時，在 `environment` 加一行 `FILEBROWSER_ADMIN_PASSWORD="新密碼"` 並重啟套件，套用後該行同樣會被移除。
+- **與 DSM 同源**：`/filebrowser/` 掛在 DSM 自己的網址底下，所以能連到 DSM 的地方（含 QuickConnect）就能連到 FileBrowser 的登入頁與公開分享。請替 FileBrowser 的帳號設定足夠強的密碼，必要時啟用兩步驟驗證。
+- **8580 連接埠是未加密的 HTTP**：只建議在區網內當退路使用，不要轉送到網際網路；對外請走 DSM 的 HTTPS。
+- **資料目錄**：`/var/packages/FileBrowserQuantum/var`（資料庫、記錄、快取）權限為僅套件使用者可讀。
+- **FFmpeg 只讀本機檔案**：縮圖與轉檔呼叫 FFmpeg 時限制為只能開啟本機檔案，避免惡意製作的「影片」讓 NAS 對外連線。
+- **建置流程**：編譯與測試的 job 只有唯讀權限；能發佈 Release 的 job 不執行任何第三方程式碼。所有 GitHub Action 都固定在特定 commit。
+- **套件來源的信任**：把這個 repo 加為 DSM 套件來源，等於信任這個 GitHub 帳號能推送程式到你的 NAS。請替 GitHub 帳號啟用兩步驟驗證。
