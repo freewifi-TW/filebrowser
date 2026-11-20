@@ -93,6 +93,7 @@ start() {
     export FILEBROWSER_DATABASE_PATH="${PKG_VAR}/database.sqlite"
     export FILEBROWSER_FFMPEG_PATH="${PKG_DEST}/bin"
     export FILEBROWSER_SYNOLOGY_THUMBNAILS="true"
+    export FILEBROWSER_SYNOLOGY_TRANSCODE="true"
     export HOME="${PKG_VAR}"
     export TMPDIR="${PKG_VAR}/tmp"
     if [ -f "${ENV_FILE}" ]; then

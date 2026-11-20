@@ -148,9 +148,14 @@ func TestNewValidation(t *testing.T) {
 
 // TestGenerateWithRealFFmpeg runs only when ffmpeg and ffprobe are on PATH.
 func TestGenerateWithRealFFmpeg(t *testing.T) {
+	// SYNOLOGY_REQUIRE_FFMPEG=1 (set in CI) turns the skips below into failures.
+	skip := t.Skipf
+	if os.Getenv("SYNOLOGY_REQUIRE_FFMPEG") == "1" {
+		skip = t.Fatalf
+	}
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
-		t.Skip("ffmpeg not on PATH")
+		skip("ffmpeg not on PATH")
 	}
 	ffprobePath, _ := exec.LookPath("ffprobe")
 
@@ -160,7 +165,7 @@ func TestGenerateWithRealFFmpeg(t *testing.T) {
 	out, err := exec.Command(ffmpegPath, "-hide_banner", "-loglevel", "error", "-y",
 		"-f", "lavfi", "-i", "testsrc=duration=4:size=1920x1080:rate=10", "-c:v", "mpeg4", video).CombinedOutput()
 	if err != nil {
-		t.Skipf("this ffmpeg build cannot create the sample video: %v: %s", err, out)
+		skip("this ffmpeg build cannot create the sample video: %v: %s", err, out)
 	}
 	past := time.Now().Add(-time.Hour)
 	if err := os.Chtimes(video, past, past); err != nil {

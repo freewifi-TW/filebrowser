@@ -26,6 +26,11 @@ FILEBROWSER_SYNOLOGY_THUMBNAILS="true"
 #FILEBROWSER_SYNOLOGY_THUMBNAIL_WATCH="false"
 # Pause between the periodic safety-net scans.
 #FILEBROWSER_SYNOLOGY_THUMBNAIL_INTERVAL="30m"
+
+# Convert videos browsers cannot play (MPEG, AVI, WMV...) to MP4 on first playback.
+FILEBROWSER_SYNOLOGY_TRANSCODE="true"
+# Size limit of the converted videos in GB (0 = unlimited).
+#FILEBROWSER_SYNOLOGY_TRANSCODE_CACHE_GB="20"
 EOF
     if [ -n "${SYNOPKG_TEMP_LOGFILE}" ]; then
         {

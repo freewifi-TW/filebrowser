@@ -7,6 +7,8 @@
 | `synology/` | `.spk` 打包腳本、DSM 整合設定、本文件 |
 | `backend/internal/synothumb/` | 把影片縮圖寫入 Synology `@eaDir` 的產生器（只用標準函式庫 + ffmpeg） |
 | `backend/cmd/synology_thumbs.go` | 啟動掛勾（設 `FILEBROWSER_SYNOLOGY_THUMBNAILS=true` 才會啟用） |
+| `backend/internal/synoplay/`、`backend/internal/web/synology_playable.go` | 把瀏覽器無法播放的影片轉成 MP4（設 `FILEBROWSER_SYNOLOGY_TRANSCODE=true` 才會啟用） |
+| `synology/apply-source-patches.sh` | 建置時在上游程式碼插入的單行掛勾（目前只有一處） |
 | `.github/workflows/synology-spk.yaml` | 自動跟上游、建置並發佈 `.spk` |
 | `synology/i18n/*.overrides.json` | 介面翻譯修正（目前只有繁體中文），建置時套用到上游的語系檔 |
 
@@ -165,3 +167,35 @@ synology/build-spk.sh --arch amd64 --version 2.1.5-0001 --upstream-tag v2.1.5-be
 - 建置時由 `synology/apply-i18n-overrides.cjs` 套用到上游的語系檔，不直接修改上游檔案，所以不會有合併衝突。
 - 上游若刪除某個鍵，或該鍵的 `{佔位符}` 與英文原文不再一致，該條修正會自動略過，不會讓建置失敗。
 - 要新增或調整翻譯，直接編輯那個 JSON 檔，並在 commit 訊息加上 `[rebuild]` 重新打包。
+
+## 播放瀏覽器不支援的影片（MPEG、AVI、WMV…）
+
+瀏覽器無法解碼 MPEG-1/2（`.mpg`、`.mpeg`、`.vob`）、AVI、WMV、FLV 等格式，上游遇到這些檔案只會顯示無法播放。套件預設啟用轉換：
+
+1. 第一次播放這類影片時，後端用 FFmpeg 把它轉成 H.264 / AAC 的 MP4，存在 `var/cache/synology-playable/`，原檔完全不動。
+2. 轉換最多等 40 秒：短片在這段時間內轉完就直接播放。
+3. 長片轉不完時，先播放「目前已轉好的部分」（此時無法拖曳時間軸、也看不到總長度）；稍後重新開啟影片可以看到更多，全部轉完後就是完整、可任意拖曳的影片。
+4. 之後再播同一支影片直接讀快取，不再轉換。原檔若有更動會重新轉換。
+
+細節：
+
+- 一次只轉一支影片，其餘排隊，避免拖垮 NAS。轉換速度取決於 CPU，ARM 機種會明顯較慢。
+- 影片原本就是 H.264、聲音是 AAC/MP3 時只換容器不重新編碼，幾秒就完成。
+- 快取超過上限（預設 20 GB）時，刪除最久沒播放的轉換檔。
+- 轉換失敗的影片在原檔沒變動前不會重試（重啟套件後會再試），此時行為與上游相同。
+- 只影響播放；下載、預覽圖與 `@eaDir` 縮圖拿到的仍是原檔。
+
+設定（寫在 `/var/packages/FileBrowserQuantum/var/environment`，改完重啟套件）：
+
+| 變數 | 預設 | 說明 |
+|---|---|---|
+| `FILEBROWSER_SYNOLOGY_TRANSCODE` | `true` | 設成其他值即關閉 |
+| `FILEBROWSER_SYNOLOGY_TRANSCODE_CACHE_GB` | `20` | 轉換檔的容量上限（GB），`0` 為不限 |
+| `FILEBROWSER_SYNOLOGY_TRANSCODE_EXTENSIONS` | 見下 | 要轉換的副檔名，以空格或逗號分隔 |
+
+預設轉換的副檔名：`mpg mpeg vob avi wmv asf flv f4v rm rmvb ts mts m2ts 3gp 3g2`。
+
+實作上有兩點與其他功能不同：
+
+- **FFmpeg 換成完整版**：上游 Docker 映像檔用的是只能解碼的精簡版（`…-decode`），沒有編碼器。套件改取同一版本號的完整版（含 libx264，屬 GPL 授權），每個 `.spk` 因此大約多 40 MB。完整版若不存在，建置會退回精簡版並發出警告，該版就沒有轉換功能。
+- **需要在上游程式碼插入一行**：`synology/apply-source-patches.sh` 在建置時於 `backend/internal/web/stream.go` 的 `ServeSingleFile` 插入一行呼叫。這個 fork 的 git 歷史裡仍然沒有修改任何上游檔案；上游若改動了那個位置，掛勾會被略過並發出警告，該版沒有轉換功能但建置不會失敗。

@@ -30,6 +30,8 @@ on:
       - "synology/**"
       - "backend/cmd/synology_thumbs.go"
       - "backend/internal/synothumb/**"
+      - "backend/internal/synoplay/**"
+      - "backend/internal/web/synology_playable.go"
       - ".github/workflows/synology-spk.yaml"
 
 permissions:
@@ -108,6 +110,11 @@ jobs:
           cp overlay/backend/cmd/synology_thumbs.go src/backend/cmd/
           rm -rf src/backend/internal/synothumb
           cp -r overlay/backend/internal/synothumb src/backend/internal/
+          rm -rf src/backend/internal/synoplay
+          cp -r overlay/backend/internal/synoplay src/backend/internal/
+          cp overlay/backend/internal/web/synology_playable.go src/backend/internal/web/
+          # One-line hooks into upstream code (skipped with a warning if upstream changed there).
+          bash overlay/synology/apply-source-patches.sh src
           # Translation corrections (skipped per key when upstream changed it).
           node overlay/synology/apply-i18n-overrides.cjs src/frontend/src/i18n
 
@@ -171,8 +178,17 @@ jobs:
         run: |
           set -euo pipefail
           for arch in amd64 arm64; do
-            docker pull -q --platform "linux/${arch}" "${{ steps.ver.outputs.ffmpeg_image }}"
-            id="$(docker create --platform "linux/${arch}" "${{ steps.ver.outputs.ffmpeg_image }}" /ffmpeg)"
+            # Upstream ships the decode-only build; video conversion needs the full build of the
+            # same version (with the libx264/aac encoders). Fall back to upstream's if it is missing.
+            image="${{ steps.ver.outputs.ffmpeg_image }}"
+            full="${image%-decode}"
+            if [ "${full}" != "${image}" ] && docker pull -q --platform "linux/${arch}" "${full}"; then
+              image="${full}"
+            else
+              docker pull -q --platform "linux/${arch}" "${image}"
+            fi
+            echo "ffmpeg (${arch}) from ${image}"
+            id="$(docker create --platform "linux/${arch}" "${image}" /ffmpeg)"
             docker cp "${id}:/ffmpeg" "dist/${arch}/ffmpeg"
             docker cp "${id}:/ffprobe" "dist/${arch}/ffprobe"
             docker rm "${id}" > /dev/null
@@ -186,9 +202,17 @@ jobs:
             done
           done
 
-      - name: Test thumbnail generator with the bundled ffmpeg
+      - name: Test thumbnail generator and video conversion with the bundled ffmpeg
         working-directory: src/backend
-        run: PATH="${GITHUB_WORKSPACE}/dist/amd64:${PATH}" go test -v ./internal/synothumb/
+        run: |
+          set -euo pipefail
+          export PATH="${GITHUB_WORKSPACE}/dist/amd64:${PATH}"
+          if ffmpeg -hide_banner -encoders 2> /dev/null | grep libx264 > /dev/null; then
+            export SYNOLOGY_REQUIRE_FFMPEG=1   # the ffmpeg-backed tests must run, not skip
+          else
+            echo "::warning::bundled ffmpeg has no libx264 encoder: video conversion will not work in this build"
+          fi
+          go test -v ./internal/synothumb/ ./internal/synoplay/
 
       - name: Smoke test binaries on a glibc system
         run: |
