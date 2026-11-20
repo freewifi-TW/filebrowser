@@ -8,7 +8,8 @@
 | `backend/internal/synothumb/` | 把影片縮圖寫入 Synology `@eaDir` 的產生器（只用標準函式庫 + ffmpeg） |
 | `backend/cmd/synology_thumbs.go` | 啟動掛勾（設 `FILEBROWSER_SYNOLOGY_THUMBNAILS=true` 才會啟用） |
 | `backend/internal/synoplay/`、`backend/internal/web/synology_playable.go` | 把瀏覽器無法播放的影片轉成 MP4（設 `FILEBROWSER_SYNOLOGY_TRANSCODE=true` 才會啟用） |
-| `synology/apply-source-patches.sh` | 建置時在上游程式碼插入的單行掛勾（目前只有一處） |
+| `synology/apply-source-patches.sh` | 建置時在上游程式碼套用的單行掛勾（目前兩處：轉檔、ffprobe 快取） |
+| `backend/internal/adapters/fs/files/synology_probe_cache.go` | 快取 ffprobe 結果，避免每次開資料夾都重新探測所有影片 |
 | `.github/workflows/synology-spk.yaml` | 自動跟上游、建置並發佈 `.spk` |
 | `synology/i18n/*.overrides.json` | 介面翻譯修正（目前只有繁體中文），建置時套用到上游的語系檔 |
 
@@ -225,3 +226,11 @@ synology/build-spk.sh --arch amd64 --version 2.1.5-0001 --upstream-tag v2.1.5-be
 - 影像不行：影像轉成 H.264，音訊能留就留。這是最花時間的情況，4K HEVC 在 NAS 上會很慢。
 
 HDR 影片轉換後不會做色調對應，顏色可能偏灰、偏淡。
+
+## 開啟含大量影片的資料夾很慢
+
+上游在開啟資料夾時，會對裡面每一支影片、每一個音訊檔執行一次 ffprobe 來取得長度與編碼，而且每次進資料夾都重做；介面要等這個結果回來才會結束讀取狀態。資料夾裡有幾千支影片時，每次進去都要等幾十秒，NAS 忙碌時會撞到 60 秒的逾時。
+
+套件把 ffprobe 的結果記下來（存在記憶體，並寫入 `var/cache/synology-probe-cache.json`，重啟後仍有效），檔案的大小或修改時間沒變就不再重跑。所以每個資料夾只有第一次進去會慢，之後幾乎是立即的。
+
+這同樣是靠建置時改寫上游的一行程式做到的（`files.go` 的 `extractVideoMetadata`），上游若改動該處，掛勾會略過並發出警告。

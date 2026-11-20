@@ -4,7 +4,7 @@
 #   synology/apply-source-patches.sh <path to upstream checkout>
 #
 # The fork never commits changes to upstream files. The few places where upstream
-# code has to call into the overlay are inserted here instead, each next to an
+# code has to call into the overlay are patched here instead, each identified by an
 # anchor line that must exist exactly once. When upstream changes such a place the
 # hook is skipped with a warning (the feature is then off in that build) rather than
 # breaking the package build.
@@ -19,41 +19,65 @@ warn() {
     echo "apply-source-patches: $*" >&2
 }
 
-# insert_before <file> <exact anchor line> <line to insert> <feature>
-insert_before() {
-    local file="${src}/$1" anchor="$2" insert="$3" feature="$4"
+# count_line <file> <exact line>: how many lines equal it, ignoring a trailing CR.
+count_line() {
+    NEEDLE="$2" perl -ne 's/\r?\n$//; $n++ if $_ eq $ENV{NEEDLE}; END { print $n // 0 }' "$1"
+}
+
+# patch_line <insert|replace> <file> <exact anchor line> <new line> <feature>
+#   insert:  put <new line> in front of the anchor line
+#   replace: put <new line> in place of the anchor line
+patch_line() {
+    local mode="$1" rel="$2" anchor="$3" new="$4" feature="$5"
+    local file="${src}/${rel}"
     if [ ! -f "${file}" ]; then
-        warn "${feature}: $1 not found, hook skipped"
+        warn "${feature}: ${rel} not found, hook skipped"
         skipped=$((skipped + 1))
         return 0
     fi
-    if grep -qxF -- "${insert}" "${file}"; then
+    if [ "$(count_line "${file}" "${new}")" != "0" ]; then
         applied=$((applied + 1)) # already applied
         return 0
     fi
     local count
-    count="$(grep -cxF -- "${anchor}" "${file}" || true)"
+    count="$(count_line "${file}" "${anchor}")"
     if [ "${count}" != "1" ]; then
-        warn "${feature}: anchor found ${count} times in $1 (expected 1), hook skipped"
+        warn "${feature}: anchor found ${count} times in ${rel} (expected 1), hook skipped"
         skipped=$((skipped + 1))
         return 0
     fi
-    ANCHOR="${anchor}" INSERT="${insert}" perl -i -ne '
-        chomp(my $line = $_);
-        $line =~ s/\r$//;
-        print "$ENV{INSERT}\n" if $line eq $ENV{ANCHOR};
-        print $_;
+    MODE="${mode}" ANCHOR="${anchor}" NEW="${new}" perl -i -ne '
+        my $line = $_;
+        $line =~ s/\r?\n$//;
+        if ($line eq $ENV{ANCHOR}) {
+            print "$ENV{NEW}\n";
+            print $_ if $ENV{MODE} eq "insert";
+        } else {
+            print $_;
+        }
     ' "${file}"
-    grep -qxF -- "${insert}" "${file}" || { warn "${feature}: insertion into $1 failed"; skipped=$((skipped + 1)); return 0; }
+    if [ "$(count_line "${file}" "${new}")" != "1" ]; then
+        warn "${feature}: patching ${rel} failed"
+        skipped=$((skipped + 1))
+        return 0
+    fi
     applied=$((applied + 1))
-    echo "apply-source-patches: ${feature}: hooked into $1"
+    echo "apply-source-patches: ${feature}: hooked into ${rel}"
 }
+
+TAB="$(printf '\t')"
 
 # Playback of formats browsers cannot decode: serve the converted MP4 instead.
 # Inserted in ServeSingleFile, after all access checks and right before the file is opened.
-insert_before "backend/internal/web/stream.go" \
-    $'\tfd, err := os.Open(realPath)' \
-    $'\trealPath, displayFileName = synologyPlayable(r, realPath, displayFileName)' \
+patch_line insert "backend/internal/web/stream.go" \
+    "${TAB}fd, err := os.Open(realPath)" \
+    "${TAB}realPath, displayFileName = synologyPlayable(r, realPath, displayFileName)" \
     "video conversion"
+
+# Folder listings: remember ffprobe results instead of probing every video on every visit.
+patch_line replace "backend/internal/adapters/fs/files/files.go" \
+    "${TAB}info, err := service.ProbeFile(ctx, realPath)" \
+    "${TAB}info, err := synologyCachedProbe(ctx, service, realPath)" \
+    "media probe cache"
 
 echo "apply-source-patches: ${applied} applied, ${skipped} skipped"

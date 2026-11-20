@@ -32,6 +32,7 @@ on:
       - "backend/internal/synothumb/**"
       - "backend/internal/synoplay/**"
       - "backend/internal/web/synology_playable.go"
+      - "backend/internal/adapters/fs/files/synology_probe_cache*.go"
       - ".github/workflows/synology-spk.yaml"
 
 # Least privilege: the build job runs third-party code (npm packages, Go modules,
@@ -118,6 +119,7 @@ jobs:
           rm -rf src/backend/internal/synoplay
           cp -r overlay/backend/internal/synoplay src/backend/internal/
           cp overlay/backend/internal/web/synology_playable.go src/backend/internal/web/
+          cp overlay/backend/internal/adapters/fs/files/synology_probe_cache.go overlay/backend/internal/adapters/fs/files/synology_probe_cache_test.go src/backend/internal/adapters/fs/files/
           # One-line hooks into upstream code (skipped with a warning if upstream changed there).
           bash overlay/synology/apply-source-patches.sh src
           # Translation corrections (skipped per key when upstream changed it).
@@ -222,6 +224,7 @@ jobs:
             echo "::warning::bundled ffmpeg has no libx264 encoder: video conversion will not work in this build"
           fi
           go test -v ./internal/synothumb/ ./internal/synoplay/
+          go test -v -run Synology ./internal/adapters/fs/files/
 
       - name: Smoke test binaries on a glibc system
         run: |
