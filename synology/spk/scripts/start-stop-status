@@ -1,0 +1,166 @@
+#!/bin/sh
+# DSM 7 service control for FileBrowser Quantum. Runs as the package user (no root).
+
+PKG_NAME="FileBrowserQuantum"
+PKG_DEST="${SYNOPKG_PKGDEST:-/var/packages/${PKG_NAME}/target}"
+PKG_VAR="${SYNOPKG_PKGVAR:-/var/packages/${PKG_NAME}/var}"
+
+BIN="${PKG_DEST}/bin/filebrowser"
+PID_FILE="${PKG_VAR}/filebrowser.pid"
+LOG_FILE="${PKG_VAR}/filebrowser.log"
+ENV_FILE="${PKG_VAR}/environment"
+CONFIG_FILE="${PKG_VAR}/config.yaml"
+MANAGED_MARK="# managed-by-package"
+
+# Must match conf/FileBrowserQuantum.sc, conf/nginx-dsm.conf and ui/index.html.
+PORT=8580
+BASE_URL="/filebrowser"
+
+running() {
+    [ -f "${PID_FILE}" ] || return 1
+    pid="$(cat "${PID_FILE}" 2>/dev/null)"
+    [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null && \
+        grep -q "filebrowser" "/proc/${pid}/cmdline" 2>/dev/null
+}
+
+# Prints one YAML source entry per shared folder this package user may read.
+# Access is granted by the admin in Control Panel > Shared Folder > Permissions >
+# "System internal user" > FileBrowserQuantum.
+detect_sources() {
+    for dir in /volume*/*; do
+        [ -d "${dir}" ] || continue
+        name="${dir##*/}"
+        case "${name}" in
+            @*|\#*|.*) continue ;;
+        esac
+        [ -r "${dir}" ] && [ -x "${dir}" ] || continue
+        esc_dir="$(printf '%s' "${dir}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        esc_name="$(printf '%s' "${name}" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        printf '    - path: "%s"\n      name: "%s"\n' "${esc_dir}" "${esc_name}"
+    done
+}
+
+# The config is regenerated on every start for as long as its first line is the
+# marker. Delete that line to take the file over and maintain it by hand.
+write_config() {
+    if [ -f "${CONFIG_FILE}" ] && [ "$(head -n 1 "${CONFIG_FILE}")" != "${MANAGED_MARK}" ]; then
+        return 0
+    fi
+    sources="$(detect_sources)"
+    if [ -z "${sources}" ]; then
+        # No shared folder granted yet: serve a placeholder so the service still starts.
+        mkdir -p "${PKG_VAR}/files"
+        cat > "${PKG_VAR}/files/README.txt" <<EOF
+No shared folder is accessible yet.
+
+DSM > Control Panel > Shared Folder > (select a folder) > Edit > Permissions,
+switch the drop-down from "Local users" to "System internal user", give
+"${PKG_NAME}" Read/Write (or Read only), then stop and start the package
+in Package Center.
+EOF
+        sources="$(printf '    - path: "%s"\n      name: "setup"\n' "${PKG_VAR}/files")"
+    fi
+    cat > "${CONFIG_FILE}.tmp" <<EOF
+${MANAGED_MARK}
+# Regenerated on every package start: one source per shared folder that the
+# "${PKG_NAME}" system internal user can read. Remove the first line of this file
+# to stop that and edit it yourself (reference: https://filebrowserquantum.com).
+http:
+  port: ${PORT}
+  baseURL: "${BASE_URL}"
+  trustProxyHeaders: true
+  trustedProxies:
+    - "127.0.0.1"
+server:
+  cacheDir: "${PKG_VAR}/cache"
+  sources:
+${sources}
+EOF
+    mv -f "${CONFIG_FILE}.tmp" "${CONFIG_FILE}"
+}
+
+start() {
+    if running; then
+        return 0
+    fi
+    # Keep one previous log generation so a crash loop cannot fill the volume.
+    if [ -f "${LOG_FILE}" ] && [ "$(wc -c < "${LOG_FILE}")" -gt 5242880 ]; then
+        mv -f "${LOG_FILE}" "${LOG_FILE}.1"
+    fi
+
+    # Defaults; ${ENV_FILE} (user editable, survives upgrades) may override any of them.
+    export FILEBROWSER_CONFIG="${CONFIG_FILE}"
+    export FILEBROWSER_DATABASE_PATH="${PKG_VAR}/database.sqlite"
+    export FILEBROWSER_FFMPEG_PATH="${PKG_DEST}/bin"
+    export FILEBROWSER_SYNOLOGY_THUMBNAILS="true"
+    export HOME="${PKG_VAR}"
+    export TMPDIR="${PKG_VAR}/tmp"
+    if [ -f "${ENV_FILE}" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        . "${ENV_FILE}"
+        set +a
+    fi
+    mkdir -p "${TMPDIR}" "${PKG_VAR}/cache"
+    write_config || return 1
+
+    cd "${PKG_VAR}" || return 1
+    nohup "${BIN}" >> "${LOG_FILE}" 2>&1 &
+    echo $! > "${PID_FILE}"
+
+    # Tell Package Center when the process dies right away (bad config, port in use...).
+    i=0
+    while [ ${i} -lt 5 ]; do
+        sleep 1
+        if ! running; then
+            echo "FileBrowser Quantum failed to start, see ${LOG_FILE}" >&2
+            [ -n "${SYNOPKG_TEMP_LOGFILE}" ] && tail -n 5 "${LOG_FILE}" >> "${SYNOPKG_TEMP_LOGFILE}"
+            rm -f "${PID_FILE}"
+            return 1
+        fi
+        i=$((i + 1))
+    done
+    return 0
+}
+
+stop() {
+    if running; then
+        pid="$(cat "${PID_FILE}")"
+        kill "${pid}" 2>/dev/null
+        i=0
+        while [ ${i} -lt 20 ] && kill -0 "${pid}" 2>/dev/null; do
+            sleep 1
+            i=$((i + 1))
+        done
+        kill -0 "${pid}" 2>/dev/null && kill -9 "${pid}" 2>/dev/null
+    fi
+    rm -f "${PID_FILE}"
+    return 0
+}
+
+case "$1" in
+    start)
+        start
+        exit $?
+        ;;
+    stop)
+        stop
+        exit 0
+        ;;
+    status)
+        if running; then
+            exit 0
+        fi
+        exit 3
+        ;;
+    prestart|prestop)
+        exit 0
+        ;;
+    log)
+        echo "${LOG_FILE}"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac

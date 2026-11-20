@@ -1,0 +1,37 @@
+#!/bin/sh
+# Runs as the package user after the files were unpacked (fresh install and upgrade).
+
+PKG_NAME="FileBrowserQuantum"
+PKG_VAR="${SYNOPKG_PKGVAR:-/var/packages/${PKG_NAME}/var}"
+ENV_FILE="${PKG_VAR}/environment"
+
+mkdir -p "${PKG_VAR}"
+
+# First install only: never ship the upstream default admin/admin login.
+if [ ! -f "${ENV_FILE}" ] && [ ! -f "${PKG_VAR}/database.sqlite" ]; then
+    password="$(head -c 9 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    umask 077
+    cat > "${ENV_FILE}" <<EOF
+# Extra environment for FileBrowser Quantum. Read on every start, kept across upgrades.
+# One VARIABLE="value" per line.
+
+# Password of the built-in "admin" user.
+FILEBROWSER_ADMIN_PASSWORD="${password}"
+
+# Write video thumbnails into Synology's @eaDir folders (File Station / Drive / Photos).
+FILEBROWSER_SYNOLOGY_THUMBNAILS="true"
+# Folders to scan, ":" separated. Default: every folder FileBrowser serves.
+#FILEBROWSER_SYNOLOGY_THUMBNAIL_PATHS="/volume1/video:/volume1/homes"
+# Pause between scans.
+#FILEBROWSER_SYNOLOGY_THUMBNAIL_INTERVAL="30m"
+EOF
+    if [ -n "${SYNOPKG_TEMP_LOGFILE}" ]; then
+        {
+            echo "FileBrowser Quantum login: admin / ${password}"
+            echo "(saved in ${ENV_FILE})"
+            echo "Grant shared-folder access: Control Panel > Shared Folder > Edit > Permissions > System internal user > ${PKG_NAME}, then restart the package."
+        } >> "${SYNOPKG_TEMP_LOGFILE}"
+    fi
+fi
+
+exit 0

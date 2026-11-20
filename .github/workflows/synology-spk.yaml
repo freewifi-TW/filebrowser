@@ -1,0 +1,254 @@
+name: synology spk
+
+# Fork-only workflow. Builds Synology DSM 7 packages (.spk) of upstream
+# gtsteffaniak/filebrowser releases, with the fork overlay applied on top:
+#   - backend/cmd/synology_thumbs.go + backend/internal/synothumb  (@eaDir video thumbnails)
+#   - synology/                                                    (packaging)
+# The upstream source is fetched at build time, so this fork never needs to be
+# merged with upstream for a new release to be packaged.
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # daily: package new upstream releases
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Upstream tag to package (e.g. v2.1.5-beta). Empty = newest stable and newest beta."
+        required: false
+        default: ""
+      force:
+        description: "Build even if this upstream tag was already released here"
+        type: boolean
+        default: false
+      publish:
+        description: "Create a GitHub release (otherwise only workflow artifacts)"
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "synology/**"
+      - "backend/cmd/synology_thumbs.go"
+      - "backend/internal/synothumb/**"
+      - ".github/workflows/synology-spk.yaml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: synology-spk
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: gtsteffaniak/filebrowser
+
+jobs:
+  resolve:
+    name: Find upstream releases to package
+    runs-on: ubuntu-latest
+    outputs:
+      tags: ${{ steps.pick.outputs.tags }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+        run: |
+          set -euo pipefail
+          all="$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" 'v*' \
+                 | sed 's#.*refs/tags/##' \
+                 | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+-(stable|beta)$' | sort -V)"
+          if [ -n "${INPUT_TAG}" ]; then
+            echo "${all}" | grep -qx "${INPUT_TAG}" || { echo "::error::${INPUT_TAG} is not an upstream stable/beta tag"; exit 1; }
+            candidates="${INPUT_TAG}"
+          else
+            candidates="$(echo "${all}" | grep -- '-stable$' | tail -n1; echo "${all}" | grep -- '-beta$' | tail -n1)"
+          fi
+          # Releases of this fork are tagged "<upstream tag>-syno.<build number>".
+          released="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[].tag_name' || true)"
+          picked=()
+          for tag in ${candidates}; do
+            if [ "${FORCE}" != "true" ] && echo "${released}" | grep -q "^${tag}-syno\."; then
+              echo "already packaged: ${tag}"
+              continue
+            fi
+            picked+=("${tag}")
+          done
+          json="$(printf '%s\n' "${picked[@]:-}" | jq -R . | jq -cs 'map(select(length > 0))')"
+          echo "tags=${json}" >> "${GITHUB_OUTPUT}"
+          echo "Will package: ${json}" | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  build:
+    name: Build ${{ matrix.tag }}
+    needs: resolve
+    if: needs.resolve.outputs.tags != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ${{ fromJSON(needs.resolve.outputs.tags) }}
+    steps:
+      - name: Checkout fork overlay
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+
+      - name: Checkout upstream ${{ matrix.tag }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ matrix.tag }}
+          path: src
+
+      - name: Apply overlay
+        run: |
+          set -euo pipefail
+          cp overlay/backend/cmd/synology_thumbs.go src/backend/cmd/
+          rm -rf src/backend/internal/synothumb
+          cp -r overlay/backend/internal/synothumb src/backend/internal/
+
+      - name: Versions
+        id: ver
+        run: |
+          set -euo pipefail
+          tag="${{ matrix.tag }}"                 # v2.1.5-beta
+          base="${tag#v}"; base="${base%%-*}"      # 2.1.5
+          channel="${tag##*-}"                     # beta | stable
+          build="$(printf '%04d' "${GITHUB_RUN_NUMBER}")"
+          ffmpeg_image="$(sed -nE 's/^FROM[[:space:]]+([^[:space:]]*ffmpeg[^[:space:]]*)[[:space:]]+AS[[:space:]]+ffmpeg.*/\1/Ip' src/_docker/Dockerfile | head -n1)"
+          [ -n "${ffmpeg_image}" ] || { echo "::error::could not find the ffmpeg image in upstream _docker/Dockerfile"; exit 1; }
+          {
+            echo "spk_version=${base}-${build}"
+            echo "channel=${channel}"
+            echo "release_tag=${tag}-syno.${GITHUB_RUN_NUMBER}"
+            echo "ffmpeg_image=${ffmpeg_image}"
+            echo "upstream_sha=$(git -C src rev-parse --short HEAD)"
+          } | tee -a "${GITHUB_OUTPUT}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: src/frontend/.nvmrc
+
+      - name: Build frontend (embedded into the binary)
+        working-directory: src/frontend
+        run: npm i && npm run build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: src/backend/go.mod
+          cache-dependency-path: src/backend/go.sum
+
+      - uses: goto-bus-stop/setup-zig@v2
+
+      - name: Build static backend binaries (same flags as upstream .goreleaser.yaml)
+        working-directory: src/backend
+        run: |
+          set -euo pipefail
+          go mod download
+          go run ./scripts/setup-gofitz-cgo
+          ldflags="-s -w \
+            -X github.com/gtsteffaniak/filebrowser/backend/internal/version.Version=${{ matrix.tag }}-syno \
+            -X github.com/gtsteffaniak/filebrowser/backend/internal/version.CommitSHA=${{ steps.ver.outputs.upstream_sha }}"
+          mkdir -p "${GITHUB_WORKSPACE}/dist/amd64" "${GITHUB_WORKSPACE}/dist/arm64"
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC="zig cc -target x86_64-linux-musl" \
+            go build -tags analytics,mupdf,musl -ldflags "${ldflags}" -o "${GITHUB_WORKSPACE}/dist/amd64/filebrowser" .
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC="zig cc -target aarch64-linux-musl" \
+            go build -tags analytics,mupdf,musl -ldflags "${ldflags}" -o "${GITHUB_WORKSPACE}/dist/arm64/filebrowser" .
+          file "${GITHUB_WORKSPACE}"/dist/*/filebrowser
+          # Synology uses glibc; a musl binary only runs there when it is fully static.
+          for f in "${GITHUB_WORKSPACE}"/dist/*/filebrowser; do
+            file "${f}" | grep -q "statically linked" || { echo "::error::${f} is not statically linked"; exit 1; }
+          done
+
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Fetch ffmpeg/ffprobe (the build upstream ships in its Docker image)
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker pull -q --platform "linux/${arch}" "${{ steps.ver.outputs.ffmpeg_image }}"
+            id="$(docker create --platform "linux/${arch}" "${{ steps.ver.outputs.ffmpeg_image }}" /ffmpeg)"
+            docker cp "${id}:/ffmpeg" "dist/${arch}/ffmpeg"
+            docker cp "${id}:/ffprobe" "dist/${arch}/ffprobe"
+            docker rm "${id}" > /dev/null
+            chmod 755 dist/${arch}/*
+            file "dist/${arch}/ffmpeg" | grep -q "statically linked" || { echo "::error::ffmpeg (${arch}) is not statically linked"; exit 1; }
+          done
+
+      - name: Test thumbnail generator with the bundled ffmpeg
+        working-directory: src/backend
+        run: PATH="${GITHUB_WORKSPACE}/dist/amd64:${PATH}" go test -v ./internal/synothumb/
+
+      - name: Smoke test binaries on a glibc system
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            docker run --rm --platform "linux/${arch}" -v "${PWD}/dist/${arch}:/b:ro" debian:stable-slim \
+              sh -c '/b/filebrowser version && /b/ffmpeg -version | head -n1 && /b/ffprobe -version | head -n1'
+          done
+
+      - name: Build .spk packages
+        run: |
+          set -euo pipefail
+          command -v convert > /dev/null || command -v magick > /dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick; }
+          mkdir -p out
+          for arch in amd64 arm64; do
+            for variant in alias portonly; do
+              bash overlay/synology/build-spk.sh \
+                --arch "${arch}" \
+                --variant "${variant}" \
+                --version "${{ steps.ver.outputs.spk_version }}" \
+                --upstream-tag "${{ matrix.tag }}" \
+                --bin-dir "dist/${arch}" \
+                --icon src/frontend/public/img/icons/favicon.png \
+                --out-dir out
+            done
+          done
+          ls -l out
+          # The package must contain runnable binaries and syntactically valid scripts.
+          mkdir check && tar -xf out/FileBrowserQuantum-x86_64-${{ steps.ver.outputs.spk_version }}.spk -C check
+          tar -tzvf check/package.tgz | grep -E '^-rwxr-xr-x .* \./bin/(filebrowser|ffmpeg|ffprobe)$' | wc -l | grep -qx 3
+          for s in check/scripts/*; do sh -n "${s}"; done
+          jq -e . check/conf/resource check/conf/privilege > /dev/null
+          mkdir check/target && tar -xzf check/package.tgz -C check/target && jq -e . check/target/ui/config > /dev/null
+          (cd out && sha256sum *.spk > SHA256SUMS.txt)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spk-${{ matrix.tag }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: overlay
+        run: |
+          set -euo pipefail
+          prerelease=""
+          [ "${{ steps.ver.outputs.channel }}" = "stable" ] || prerelease="--prerelease"
+          cat > ../notes.md <<EOF
+          Synology DSM 7.2+ package of FileBrowser Quantum **${{ matrix.tag }}** with bundled FFmpeg.
+
+          - Upstream release notes: https://github.com/${UPSTREAM_REPO}/releases/tag/${{ matrix.tag }}
+          - Package version: \`${{ steps.ver.outputs.spk_version }}\`
+          - FFmpeg: \`${{ steps.ver.outputs.ffmpeg_image }}\`
+
+          | NAS CPU | File |
+          |---|---|
+          | Intel / AMD (x86_64) | \`FileBrowserQuantum-x86_64-${{ steps.ver.outputs.spk_version }}.spk\` |
+          | ARM 64-bit (aarch64) | \`FileBrowserQuantum-aarch64-${{ steps.ver.outputs.spk_version }}.spk\` |
+
+          The \`-portonly\` files are a fallback that does not touch DSM's web server (no QuickConnect
+          access, port 8580 only). Use one only if the normal package fails to install.
+
+          Install or update: Package Center → Manual Install → pick the .spk. See \`synology/README.md\`.
+          EOF
+          sed -i 's/^          //' ../notes.md
+          gh release create "${{ steps.ver.outputs.release_tag }}" ../out/*.spk ../out/SHA256SUMS.txt \
+            --target "${GITHUB_SHA}" \
+            --title "FileBrowser Quantum ${{ matrix.tag }} for Synology (build ${GITHUB_RUN_NUMBER})" \
+            --notes-file ../notes.md ${prerelease}

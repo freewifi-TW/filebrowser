@@ -1,0 +1,15 @@
+{
+  "port-config": {
+    "protocol-file": "conf/FileBrowserQuantum.sc"
+  },
+  "web-config": {
+    "nginx-static-config": {
+      "enable": [
+        {
+          "type": "dsm",
+          "relpath": "conf/nginx-dsm.conf"
+        }
+      ]
+    }
+  }
+}

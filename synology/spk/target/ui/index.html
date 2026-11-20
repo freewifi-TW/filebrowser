@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FileBrowser Quantum</title>
+<style>
+  body { font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0; background: #f4f6f8; color: #1f2933; }
+  main { max-width: 34rem; margin: 18vh auto 0; padding: 0 16px; }
+  h1 { font-size: 1.25rem; }
+  code { background: #e4e8ec; padding: 1px 5px; border-radius: 3px; }
+  @media (prefers-color-scheme: dark) { body { background: #16191d; color: #e4e8ec; } code { background: #2a3038; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>FileBrowser Quantum</h1>
+  <p id="msg">Opening…</p>
+</main>
+<script>
+// Launcher opened by the DSM main-menu icon. It is served by DSM itself, so it
+// always loads - through QuickConnect too.
+//  1. Preferred: the "/filebrowser/" path on this same DSM address (works through QuickConnect).
+//  2. Fallback: FileBrowser's own port on this host (LAN / port forwarding only).
+(function () {
+  var ALIAS = "/filebrowser/";
+  var PORT = 8580;
+  var msg = document.getElementById("msg");
+
+  function fallback() {
+    var host = location.hostname;
+    if (/quickconnect\.(to|cn)$/i.test(host)) {
+      msg.innerHTML = "FileBrowser Quantum is not reachable on this DSM address, and its own port (" + PORT +
+        ") cannot be used through QuickConnect.<br><br>Check in Package Center that the package is running. " +
+        "If it is, the <code>/filebrowser/</code> path could not be registered in DSM; see <code>synology/README.md</code>.";
+      return;
+    }
+    var direct = "http://" + (host.indexOf(":") >= 0 ? "[" + host + "]" : host) + ":" + PORT + ALIAS;
+    msg.innerHTML = 'Opening <a href="' + direct + '">' + direct + "</a>…";
+    location.replace(direct);
+  }
+
+  fetch(ALIAS + "health", { cache: "no-store", credentials: "omit" })
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(); })
+    .then(function (j) {
+      if (!j || j.message !== "ok") { throw new Error("not filebrowser"); }
+      location.replace(ALIAS);
+    })
+    .catch(fallback);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  ".url": {
+    "com.filebrowserquantum.app": {
+      "type": "url",
+      "title": "FileBrowser Quantum",
+      "desc": "FileBrowser Quantum",
+      "icon": "images/icon_{0}.png",
+      "url": "webman/3rdparty/FileBrowserQuantum/index.html",
+      "urlTarget": "_filebrowser_quantum",
+      "allUsers": true
+    }
+  }
+}
