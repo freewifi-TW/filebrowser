@@ -53,7 +53,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_TAG: ${{ inputs.upstream_tag }}
-          FORCE: ${{ inputs.force || github.event_name == 'push' }}
+          # A push only re-packages already released versions when the commit message says so.
+          FORCE: ${{ inputs.force || (github.event_name == 'push' && contains(github.event.head_commit.message, '[rebuild]')) }}
         run: |
           set -euo pipefail
           all="$(git ls-remote --tags --refs "https://github.com/${UPSTREAM_REPO}.git" 'v*' \
@@ -277,8 +278,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          site_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          # Served straight from the branch by raw.githubusercontent.com: no GitHub Pages needed.
+          site_url="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages"
           mkdir -p site dl
           touch site/.nojekyll
           command -v convert > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick; }

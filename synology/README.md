@@ -39,24 +39,22 @@
 
 ## 從套件中心的「套件來源」安裝與更新
 
-Workflow 每次發佈後會更新一份套件清單，放在本 repo 的 GitHub Pages（`gh-pages` 分支）。加入後，套件會出現在套件中心的「社群」分頁，有新版時 DSM 會顯示「更新」。
+Workflow 每次發佈後會更新一份套件清單（JSON），放在本 repo 的 `gh-pages` 分支，直接用 raw 網址讀取，不需要開啟 GitHub Pages。加入後，套件會出現在套件中心的「社群」分頁，有新版時 DSM 會顯示「更新」。
 
-一次性設定：
 
-1. GitHub repo → **Settings → Pages** → Source 選 *Deploy from a branch*，Branch 選 `gh-pages`、資料夾 `/ (root)` → Save。
-2. DSM → **套件中心 → 設定 → 套件來源 → 新增**，名稱自訂，位置依 NAS 的 CPU 與想跟的通道擇一：
+DSM → **套件中心 → 設定 → 套件來源 → 新增**，名稱自訂，位置依 NAS 的 CPU 與想跟的通道擇一：
 
 | CPU | 通道 | 位置 |
 |---|---|---|
-| Intel / AMD | stable | `https://freewifi-tw.github.io/filebrowser/x86_64.json` |
-| Intel / AMD | beta | `https://freewifi-tw.github.io/filebrowser/beta-x86_64.json` |
-| ARM 64 位元 | stable | `https://freewifi-tw.github.io/filebrowser/aarch64.json` |
-| ARM 64 位元 | beta | `https://freewifi-tw.github.io/filebrowser/beta-aarch64.json` |
+| Intel / AMD | stable | `https://raw.githubusercontent.com/freewifi-TW/filebrowser/gh-pages/x86_64.json` |
+| Intel / AMD | beta | `https://raw.githubusercontent.com/freewifi-TW/filebrowser/gh-pages/beta-x86_64.json` |
+| ARM 64 位元 | stable | `https://raw.githubusercontent.com/freewifi-TW/filebrowser/gh-pages/aarch64.json` |
+| ARM 64 位元 | beta | `https://raw.githubusercontent.com/freewifi-TW/filebrowser/gh-pages/beta-aarch64.json` |
 
 注意：
 
 - 清單是靜態檔，無法依 DSM 回報的架構過濾，所以**一定要選對 CPU 的網址**；選錯時安裝會被 DSM 拒絕，不會裝壞。
-- 尚未實機驗證：靜態主機只能回應 GET。若 DSM 是用 POST 查詢套件來源，GitHub Pages 會拒絕，套件就不會出現在「社群」分頁——那時仍可用上面的手動安裝。
+- 尚未實機驗證：靜態主機只能回應 GET。若 DSM 是用 POST 查詢套件來源，GitHub 會拒絕，套件就不會出現在「社群」分頁——那時仍可用上面的手動安裝。
 - 清單只提供正常版（不含 `-portonly`）。
 
 ## 更新
@@ -80,7 +78,7 @@ Workflow 每次發佈後會更新一份套件清單，放在本 repo 的 GitHub 
 想讓 fork 的 `main` 在 GitHub 上看起來也是最新的，按 GitHub 的 **Sync fork** 即可（overlay 都是新增檔案，不會衝突）。
 
 手動觸發：Actions → *synology spk* → Run workflow，可指定上游 tag、強制重建、是否發佈。
-修改 `synology/` 或 overlay 並推到 `main` 也會自動重建最新版。
+修改 `synology/` 或 overlay 並推到 `main` 時，只有 commit 訊息含 `[rebuild]` 才會把已發佈過的版本重新打包；否則只更新套件清單。
 
 第一次使用前請在 GitHub 上：
 
