@@ -92,7 +92,7 @@ func TestNeedsConversion(t *testing.T) {
 }
 
 func TestPlayableConvertsOnceAndCaches(t *testing.T) {
-	stub := &stubRunner{probeOut: "mpeg2video,video\nmp2,audio\n"}
+	stub := &stubRunner{probeOut: probeText("mpeg2video", "yuv420p", "mp2")}
 	m, src := newTestManager(t, stub, nil)
 
 	path, ok := m.Playable(context.Background(), src)
@@ -127,7 +127,7 @@ func TestPlayableConvertsOnceAndCaches(t *testing.T) {
 }
 
 func TestStreamCopyWhenAlreadyH264(t *testing.T) {
-	stub := &stubRunner{probeOut: "h264,video\naac,audio\n"}
+	stub := &stubRunner{probeOut: probeText("h264", "yuv420p", "aac")}
 	m, src := newTestManager(t, stub, nil)
 	if _, ok := m.Playable(context.Background(), src); !ok {
 		t.Fatal("not playable")
@@ -138,7 +138,7 @@ func TestStreamCopyWhenAlreadyH264(t *testing.T) {
 }
 
 func TestFallsBackToReencodeWhenCopyFails(t *testing.T) {
-	stub := &stubRunner{probeOut: "h264,video\naac,audio\n", failCopy: true}
+	stub := &stubRunner{probeOut: probeText("h264", "yuv420p", "aac"), failCopy: true}
 	m, src := newTestManager(t, stub, nil)
 	if _, ok := m.Playable(context.Background(), src); !ok {
 		t.Fatal("not playable after fallback")
@@ -302,5 +302,74 @@ func TestConvertWithRealFFmpeg(t *testing.T) {
 	moov, mdat := strings.Index(string(data), "moov"), strings.Index(string(data), "mdat")
 	if moov < 0 || mdat < 0 || moov > mdat {
 		t.Errorf("result is not a faststart MP4 (moov at %d, mdat at %d)", moov, mdat)
+	}
+}
+
+// probeText mimics "ffprobe -of default=noprint_wrappers=1" for one video and one audio stream.
+func probeText(video, pixFmt, audio string) string {
+	out := ""
+	if video != "" {
+		out += "codec_name=" + video + "\ncodec_type=video\npix_fmt=" + pixFmt + "\n"
+	}
+	if audio != "" {
+		out += "codec_name=" + audio + "\ncodec_type=audio\n"
+	}
+	return out
+}
+
+func TestShouldConvertByCodec(t *testing.T) {
+	cases := []struct {
+		name, file, video, pix, audio string
+		want                          bool
+	}{
+		{"unplayable container, no probe needed", "a.mpg", "", "", "", true},
+		{"plain H.264 + AAC", "a.mp4", "h264", "yuv420p", "aac", false},
+		{"HEVC (sound but no picture)", "a.mp4", "hevc", "yuv420p", "aac", true},
+		{"10-bit H.264", "a.mkv", "h264", "yuv420p10le", "aac", true},
+		{"old MPEG-4 Part 2", "a.mp4", "mpeg4", "yuv420p", "mp3", true},
+		{"AC-3 audio (picture but no sound)", "a.mkv", "h264", "yuv420p", "ac3", true},
+		{"VP9 + Opus", "a.mkv", "vp9", "yuv420p", "opus", false},
+		{"video without audio", "a.mov", "h264", "yuvj420p", "", false},
+		{"audio only", "a.mp4", "", "", "aac", false},
+		{"not a probed container", "a.webm", "hevc", "yuv420p", "aac", false},
+	}
+	for _, c := range cases {
+		stub := &stubRunner{probeOut: probeText(c.video, c.pix, c.audio)}
+		m, src := newTestManager(t, stub, nil)
+		path := filepath.Join(filepath.Dir(src), c.file)
+		if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := m.ShouldConvert(context.Background(), path); got != c.want {
+			t.Errorf("%s: ShouldConvert = %v, want %v", c.name, got, c.want)
+		}
+		// The verdict is cached: asking again must not run ffprobe a second time.
+		before := len(stub.calls)
+		m.ShouldConvert(context.Background(), path)
+		if len(stub.calls) != before {
+			t.Errorf("%s: ffprobe ran again for an unchanged file", c.name)
+		}
+	}
+}
+
+func TestHevcIsReencodedAndPlayableAudioCopied(t *testing.T) {
+	stub := &stubRunner{probeOut: probeText("hevc", "yuv420p10le", "aac")}
+	m, src := newTestManager(t, stub, nil)
+	if _, ok := m.Playable(context.Background(), src); !ok {
+		t.Fatal("not playable")
+	}
+	if n, last := stub.encodes(); n != 1 || !strings.Contains(last, "-c:v libx264") || !strings.Contains(last, "-c:a copy") {
+		t.Fatalf("expected video re-encode with audio copy, got %d: %s", n, last)
+	}
+}
+
+func TestOnlyAudioIsReencodedForAc3(t *testing.T) {
+	stub := &stubRunner{probeOut: probeText("h264", "yuv420p", "ac3")}
+	m, src := newTestManager(t, stub, nil)
+	if _, ok := m.Playable(context.Background(), src); !ok {
+		t.Fatal("not playable")
+	}
+	if n, last := stub.encodes(); n != 1 || !strings.Contains(last, "-c:v copy") || !strings.Contains(last, "-c:a aac") {
+		t.Fatalf("expected video copy with audio re-encode, got %d: %s", n, last)
 	}
 }

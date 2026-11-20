@@ -3,7 +3,8 @@ package web
 // Fork-only file (not part of upstream FileBrowser Quantum).
 //
 // Lets the media stream endpoint serve a browser-playable MP4 instead of a video
-// the browser cannot decode (MPEG-1/2, AVI, WMV, ...). Enabled with
+// the browser cannot decode: unplayable containers (MPEG-1/2, AVI, WMV, ...) and
+// MP4/MOV/MKV files whose codecs browsers lack (HEVC, 10-bit, AC-3/DTS audio). Enabled with
 // FILEBROWSER_SYNOLOGY_TRANSCODE=true.
 //
 // It is reached through a single line that synology/apply-source-patches.sh inserts
@@ -85,7 +86,7 @@ func synologyPlayable(r *http.Request, realPath, displayFileName string) (string
 		return realPath, displayFileName
 	}
 	manager := synologyPlay()
-	if manager == nil || !manager.NeedsConversion(realPath) {
+	if manager == nil || !manager.ShouldConvert(r.Context(), realPath) {
 		return realPath, displayFileName
 	}
 	playable, ok := manager.Playable(r.Context(), realPath)

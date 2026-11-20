@@ -23,11 +23,45 @@ import (
 	"time"
 )
 
-// DefaultExtensions are the lowercase extensions (without dot) that browsers cannot
-// play natively and that are therefore converted.
+// DefaultExtensions are the lowercase extensions (without dot) of containers that
+// browsers cannot play at all; such files are always converted.
 var DefaultExtensions = []string{
 	"mpg", "mpeg", "vob", "avi", "wmv", "asf", "flv", "f4v",
 	"rm", "rmvb", "ts", "mts", "m2ts", "3gp", "3g2",
+}
+
+// DefaultProbeExtensions are containers browsers do play, but only with some codecs.
+// An .mp4 holding HEVC (H.265) or 10-bit video plays sound without picture, one with
+// AC-3/DTS audio plays picture without sound. These files are inspected with ffprobe
+// and converted only when a stream is not browser-compatible.
+var DefaultProbeExtensions = []string{"mp4", "m4v", "mov", "mkv"}
+
+// streams describes the first video and audio stream of a file ("" if unknown/absent).
+type streams struct {
+	video  string // codec name, e.g. "h264", "hevc", "mpeg2video"
+	pixFmt string // e.g. "yuv420p", "yuv420p10le"
+	audio  string // codec name, e.g. "aac", "ac3"
+}
+
+// videoPlayable reports whether browsers decode the video stream as it is.
+func (s streams) videoPlayable() bool {
+	switch s.video {
+	case "h264":
+		// Only 8-bit 4:2:0 H.264 is universally supported.
+		return s.pixFmt == "" || s.pixFmt == "yuv420p" || s.pixFmt == "yuvj420p"
+	case "vp8", "vp9", "av1":
+		return true
+	}
+	return false
+}
+
+// audioPlayable reports whether browsers decode the audio stream (or there is none).
+func (s streams) audioPlayable() bool {
+	switch s.audio {
+	case "", "aac", "mp3", "opus", "vorbis", "flac":
+		return true
+	}
+	return false
 }
 
 const (
@@ -44,15 +78,18 @@ type Logf func(format string, args ...any)
 
 // Config configures a Manager.
 type Config struct {
-	FFmpegPath    string        // full path to an ffmpeg binary that has the libx264 and aac encoders
-	FFprobePath   string        // full path to ffprobe (optional: without it everything is re-encoded)
-	CacheDir      string        // directory for converted files; created if missing
-	MaxCacheBytes int64         // delete least recently used conversions beyond this size; <= 0 means unlimited
-	Extensions    []string      // defaults to DefaultExtensions
-	FirstWait     time.Duration // how long a playback request waits for a conversion (default 40s)
-	JobTimeout    time.Duration // upper bound for one conversion (default 6h)
-	Info          Logf          // optional
-	Debug         Logf          // optional
+	FFmpegPath    string   // full path to an ffmpeg binary that has the libx264 and aac encoders
+	FFprobePath   string   // full path to ffprobe (optional: without it everything is re-encoded)
+	CacheDir      string   // directory for converted files; created if missing
+	MaxCacheBytes int64    // delete least recently used conversions beyond this size; <= 0 means unlimited
+	Extensions    []string // always converted; defaults to DefaultExtensions
+	// ProbeExtensions are converted only when a codec is not browser-compatible;
+	// nil means DefaultProbeExtensions, an empty slice disables probing.
+	ProbeExtensions []string
+	FirstWait       time.Duration // how long a playback request waits for a conversion (default 40s)
+	JobTimeout      time.Duration // upper bound for one conversion (default 6h)
+	Info            Logf          // optional
+	Debug           Logf          // optional
 }
 
 type job struct {
@@ -62,13 +99,15 @@ type job struct {
 
 // Manager converts videos one at a time and hands out the playable copies.
 type Manager struct {
-	cfg  Config
-	exts map[string]struct{}
+	cfg       Config
+	exts      map[string]struct{}
+	probeExts map[string]struct{}
 
-	mu     sync.Mutex
-	jobs   map[string]*job   // running or queued, by cache key
-	failed map[string]string // cache key -> error text; not retried until the source changes
-	queue  chan func()
+	mu       sync.Mutex
+	jobs     map[string]*job   // running or queued, by cache key
+	failed   map[string]string // cache key -> error text; not retried until the source changes
+	verdicts map[string]bool   // cache key -> "must be converted", for probed containers
+	queue    chan func()
 
 	// run executes a command and returns its combined stderr/stdout; replaceable in tests.
 	run func(ctx context.Context, bin string, args ...string) ([]byte, error)
@@ -90,6 +129,9 @@ func New(cfg Config) (*Manager, error) {
 	if len(cfg.Extensions) == 0 {
 		cfg.Extensions = DefaultExtensions
 	}
+	if cfg.ProbeExtensions == nil {
+		cfg.ProbeExtensions = DefaultProbeExtensions
+	}
 	if cfg.FirstWait <= 0 {
 		cfg.FirstWait = 40 * time.Second
 	}
@@ -103,15 +145,20 @@ func New(cfg Config) (*Manager, error) {
 		cfg.Debug = func(string, ...any) {}
 	}
 	m := &Manager{
-		cfg:    cfg,
-		exts:   map[string]struct{}{},
-		jobs:   map[string]*job{},
-		failed: map[string]string{},
-		queue:  make(chan func(), 256),
-		run:    runCommand,
+		cfg:       cfg,
+		exts:      map[string]struct{}{},
+		probeExts: map[string]struct{}{},
+		jobs:      map[string]*job{},
+		failed:    map[string]string{},
+		verdicts:  map[string]bool{},
+		queue:     make(chan func(), 256),
+		run:       runCommand,
 	}
 	for _, e := range cfg.Extensions {
 		m.exts[strings.ToLower(strings.TrimPrefix(e, "."))] = struct{}{}
+	}
+	for _, e := range cfg.ProbeExtensions {
+		m.probeExts[strings.ToLower(strings.TrimPrefix(e, "."))] = struct{}{}
 	}
 	// Leftovers of conversions interrupted by a restart are useless.
 	for _, pattern := range []string{"*" + partialSuffix, "*" + tmpSuffix} {
@@ -132,6 +179,46 @@ func New(cfg Config) (*Manager, error) {
 func (m *Manager) NeedsConversion(name string) bool {
 	_, ok := m.exts[strings.ToLower(strings.TrimPrefix(filepath.Ext(name), "."))]
 	return ok
+}
+
+// ShouldConvert reports whether src must be converted for browser playback: always
+// for unplayable containers, and for containers such as MP4 when ffprobe finds a
+// video or audio codec browsers cannot decode. The ffprobe verdict is remembered
+// until the file changes, so repeated range requests cost nothing.
+func (m *Manager) ShouldConvert(ctx context.Context, src string) bool {
+	if m.NeedsConversion(src) {
+		return true
+	}
+	if _, probed := m.probeExts[strings.ToLower(strings.TrimPrefix(filepath.Ext(src), "."))]; !probed || m.cfg.FFprobePath == "" {
+		return false
+	}
+	st, err := os.Stat(src)
+	if err != nil || st.IsDir() || st.Size() == 0 {
+		return false
+	}
+	key := cacheKey(src, st.Size(), st.ModTime())
+	m.mu.Lock()
+	verdict, known := m.verdicts[key]
+	m.mu.Unlock()
+	if known {
+		return verdict
+	}
+	info, ok := m.probe(ctx, src)
+	if !ok {
+		return false // unreadable or probe interrupted: serve the original, ask again next time
+	}
+	// Without a video stream there is nothing to fix here (and nothing to map).
+	verdict = info.video != "" && (!info.videoPlayable() || !info.audioPlayable())
+	m.mu.Lock()
+	if len(m.verdicts) > 20000 {
+		m.verdicts = map[string]bool{}
+	}
+	m.verdicts[key] = verdict
+	m.mu.Unlock()
+	if verdict {
+		m.cfg.Debug("video conversion: %s needs converting (video %s %s, audio %s)", src, info.video, info.pixFmt, info.audio)
+	}
+	return verdict
 }
 
 // cacheKey changes whenever the source file changes.
@@ -231,16 +318,18 @@ func (m *Manager) convertFile(src, partial, final string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.JobTimeout)
 	defer cancel()
 
-	video, audio := m.probe(ctx, src)
-	copyVideo := video == "h264"
-	copyAudio := audio == "aac" || audio == "mp3"
+	info, _ := m.probe(ctx, src)
+	// Streams browsers already decode are copied, which is fast and lossless; VP8 is the
+	// exception because it cannot be stored in MP4.
+	copyVideo := info.videoPlayable() && info.video != "vp8"
+	copyAudio := info.audio == "aac" || info.audio == "mp3"
 
-	err := m.encode(ctx, src, partial, copyVideo, copyAudio, audio != "")
+	err := m.encode(ctx, src, partial, copyVideo, copyAudio, info.audio != "")
 	if err != nil && (copyVideo || copyAudio) {
 		// Stream copy does not survive every container; re-encode everything instead.
 		m.cfg.Debug("video conversion: stream copy failed for %s (%v), re-encoding", src, err)
 		_ = os.Remove(partial)
-		err = m.encode(ctx, src, partial, false, false, audio != "")
+		err = m.encode(ctx, src, partial, false, false, info.audio != "")
 	}
 	if err != nil {
 		return err
@@ -267,32 +356,48 @@ func (m *Manager) convertFile(src, partial, final string) error {
 	return os.Rename(partial, final)
 }
 
-// probe returns the codec names of the first video and audio streams ("" if unknown).
-func (m *Manager) probe(ctx context.Context, src string) (video, audio string) {
+// probe inspects the first video and audio stream with ffprobe. ok is false when
+// ffprobe is unavailable or failed.
+func (m *Manager) probe(ctx context.Context, src string) (info streams, ok bool) {
 	if m.cfg.FFprobePath == "" {
-		return "", ""
+		return info, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := m.run(ctx, m.cfg.FFprobePath,
-		"-v", "error", "-protocol_whitelist", "file", "-show_entries", "stream=codec_type,codec_name", "-of", "csv=p=0", src)
+		"-v", "error", "-protocol_whitelist", "file",
+		"-show_entries", "stream=codec_name,codec_type,pix_fmt", "-of", "default=noprint_wrappers=1", src)
 	if err != nil {
-		return "", ""
+		return info, false
 	}
-	// One line per stream: "<codec_name>,<codec_type>".
+	// "key=value" lines; every stream starts with its codec_name.
+	var name, kind, pix string
+	flush := func() {
+		switch {
+		case kind == "video" && info.video == "":
+			info.video, info.pixFmt = name, pix
+		case kind == "audio" && info.audio == "":
+			info.audio = name
+		}
+		name, kind, pix = "", "", ""
+	}
 	for _, line := range strings.Split(string(out), "\n") {
-		fields := strings.Split(strings.TrimSpace(line), ",")
-		if len(fields) < 2 {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found {
 			continue
 		}
-		switch {
-		case fields[1] == "video" && video == "":
-			video = fields[0]
-		case fields[1] == "audio" && audio == "":
-			audio = fields[0]
+		switch key {
+		case "codec_name":
+			flush()
+			name = value
+		case "codec_type":
+			kind = value
+		case "pix_fmt":
+			pix = value
 		}
 	}
-	return video, audio
+	flush()
+	return info, true
 }
 
 func (m *Manager) encode(ctx context.Context, src, dst string, copyVideo, copyAudio, hasAudio bool) error {
