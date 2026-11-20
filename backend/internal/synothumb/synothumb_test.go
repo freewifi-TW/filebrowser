@@ -75,10 +75,10 @@ func TestScanOnce(t *testing.T) {
 	writeFile(t, filepath.Join(root, "a.mp4"), old)
 	writeFile(t, filepath.Join(root, "sub", "b.MKV"), old)
 	writeFile(t, filepath.Join(root, "sub", "broken.mov"), old)
-	writeFile(t, filepath.Join(root, "fresh.mp4"), time.Now())                // still uploading
-	writeFile(t, filepath.Join(root, "notes.txt"), old)                       // not a video
-	writeFile(t, filepath.Join(root, ".hidden.mp4"), old)                     // hidden file
-	writeFile(t, filepath.Join(root, "#recycle", "gone.mp4"), old)            // recycle bin
+	writeFile(t, filepath.Join(root, "fresh.mp4"), time.Now())                      // still uploading
+	writeFile(t, filepath.Join(root, "notes.txt"), old)                             // not a video
+	writeFile(t, filepath.Join(root, ".hidden.mp4"), old)                           // hidden file
+	writeFile(t, filepath.Join(root, "#recycle", "gone.mp4"), old)                  // recycle bin
 	writeFile(t, filepath.Join(root, "@eaDir", "a.mp4", "SYNOPHOTO_FILM.mp4"), old) // Synology metadata
 
 	g, calls := newStubGenerator(t, root, map[string]bool{"broken.mov": true})

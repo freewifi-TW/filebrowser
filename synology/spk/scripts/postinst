@@ -22,7 +22,9 @@ FILEBROWSER_ADMIN_PASSWORD="${password}"
 FILEBROWSER_SYNOLOGY_THUMBNAILS="true"
 # Folders to scan, ":" separated. Default: every folder FileBrowser serves.
 #FILEBROWSER_SYNOLOGY_THUMBNAIL_PATHS="/volume1/video:/volume1/homes"
-# Pause between scans.
+# New videos are handled within seconds; set to "false" to rely on periodic scans only.
+#FILEBROWSER_SYNOLOGY_THUMBNAIL_WATCH="false"
+# Pause between the periodic safety-net scans.
 #FILEBROWSER_SYNOLOGY_THUMBNAIL_INTERVAL="30m"
 EOF
     if [ -n "${SYNOPKG_TEMP_LOGFILE}" ]; then

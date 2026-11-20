@@ -68,8 +68,13 @@
 
 ## 影片縮圖（`@eaDir`）
 
-啟用後（套件預設啟用），每 30 分鐘掃描一次所有來源，替還沒有縮圖的影片在
-`<資料夾>/@eaDir/<影片檔名>/` 寫入：
+啟用後（套件預設啟用）有兩條路徑同時運作，替還沒有縮圖的影片在
+`<資料夾>/@eaDir/<影片檔名>/` 寫入縮圖：
+
+- **即時監看**（inotify）：影片寫完關閉或被搬進資料夾的幾秒內就處理，不論是從 FileBrowser、Synology Drive、SMB 或手機備份進來。
+- **定期掃描**：每 30 分鐘掃一次所有來源作為保底（例如資料夾數量超過系統 `fs.inotify.max_user_watches` 上限時，超出的部分只靠掃描；記錄檔會有一行提示）。
+
+寫入的檔案：
 
 | 檔案 | 尺寸上限 | 讀取者（依社群資料，非 Synology 官方規格） |
 |---|---|---|
@@ -80,7 +85,7 @@
 行為：
 
 - 已存在且不比影片舊的縮圖（包含 DSM 自己產生的）**不會被覆寫**。
-- 修改時間在 2 分鐘內的檔案先跳過（可能還在上傳／同步）。
+- 定期掃描時，修改時間在 2 分鐘內的檔案先跳過（可能還在上傳／同步）；即時監看則是等檔案被關閉後才處理。
 - 略過 `@eaDir`、`#recycle`、`#snapshot` 等 `@`、`#`、`.` 開頭的資料夾。
 - 產生成功後會刪掉同目錄的 `*.fail`（DSM 的「轉檔失敗」標記）。
 - 失敗的影片在檔案沒變動前不會重試（重啟套件後會再試一次）。
@@ -91,7 +96,8 @@
 |---|---|---|
 | `FILEBROWSER_SYNOLOGY_THUMBNAILS` | `true` | 設成其他值即關閉 |
 | `FILEBROWSER_SYNOLOGY_THUMBNAIL_PATHS` | 全部來源 | 只掃描這些資料夾，以 `:` 分隔 |
-| `FILEBROWSER_SYNOLOGY_THUMBNAIL_INTERVAL` | `30m` | 掃描間隔 |
+| `FILEBROWSER_SYNOLOGY_THUMBNAIL_INTERVAL` | `30m` | 定期掃描的間隔 |
+| `FILEBROWSER_SYNOLOGY_THUMBNAIL_WATCH` | `true` | 設成 `false` 關閉即時監看，只靠定期掃描 |
 
 ## 尚未在實機驗證的部分
 

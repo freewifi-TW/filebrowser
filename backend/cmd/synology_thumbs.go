@@ -13,6 +13,7 @@ package cmd
 //	FILEBROWSER_SYNOLOGY_THUMBNAIL_PATHS      directories to scan, separated by the OS path list
 //	                                          separator (":" on Linux). Default: every configured source.
 //	FILEBROWSER_SYNOLOGY_THUMBNAIL_INTERVAL   pause between scans as a Go duration (default: 30m)
+//	FILEBROWSER_SYNOLOGY_THUMBNAIL_WATCH      "false" to disable reacting to new videos right away
 
 import (
 	"context"
@@ -71,6 +72,7 @@ func runSynologyThumbnails() {
 		FFprobePath: executablePath(settings.Env.FFprobePath, "ffprobe"),
 		Roots:       roots,
 		Interval:    interval,
+		Watch:       os.Getenv("FILEBROWSER_SYNOLOGY_THUMBNAIL_WATCH") != "false",
 		MinAge:      2 * time.Minute,
 		Info:        logger.Infof,
 		Debug:       logger.Debugf,

@@ -69,6 +69,7 @@ type Config struct {
 	FFprobePath string        // full path to the ffprobe binary (optional; without it the frame is taken from the start)
 	Roots       []string      // directories to scan recursively
 	Interval    time.Duration // pause between full scans; <= 0 means scan once
+	Watch       bool          // also react to newly written videos right away (Linux inotify)
 	MinAge      time.Duration // skip videos modified more recently than this (still uploading/syncing)
 	SeekPercent float64       // position of the captured frame, in percent of the duration
 	Timeout     time.Duration // per-ffmpeg-invocation timeout
@@ -95,6 +96,8 @@ type Generator struct {
 	now    func() time.Time
 	// generate is g.Generate; replaceable in tests.
 	generate func(ctx context.Context, videoPath string, videoMtime time.Time) error
+	events   <-chan string // paths from the live watcher; nil when not watching
+	rescan   bool          // the watcher lost events: scan again without waiting
 }
 
 // New validates cfg and returns a Generator.
@@ -132,10 +135,16 @@ func New(cfg Config) (*Generator, error) {
 	return g, nil
 }
 
-// Run scans all roots, then sleeps Interval and repeats until ctx is cancelled.
+// Run scans all roots, then waits Interval and repeats until ctx is cancelled.
+// With Watch enabled, videos written in the meantime are handled within seconds;
+// the periodic scan remains as a safety net.
 func (g *Generator) Run(ctx context.Context) {
+	if g.cfg.Watch {
+		g.events = startWatcher(ctx, g)
+	}
 	for {
 		start := g.now()
+		g.rescan = false
 		stats := g.ScanOnce(ctx)
 		if ctx.Err() != nil {
 			return
@@ -147,13 +156,62 @@ func (g *Generator) Run(ctx context.Context) {
 		} else {
 			g.cfg.Debug("synology thumbnails: scan finished in %s - %d videos, nothing to do", took, stats.Videos)
 		}
-		if g.cfg.Interval <= 0 {
+		if g.cfg.Interval <= 0 && g.events == nil {
 			return
 		}
+		var timer <-chan time.Time // nil (never fires) without an interval
+		if g.cfg.Interval > 0 {
+			timer = time.After(g.cfg.Interval)
+		}
+		for wait := !g.rescan; wait; {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer:
+				wait = false
+			case path := <-g.events:
+				g.handleEvent(ctx, path)
+				wait = !g.rescan
+			}
+		}
+	}
+}
+
+// handleEvent processes one path reported by the watcher. The file was just closed
+// by its writer, so unlike the scan it is not held back by MinAge.
+func (g *Generator) handleEvent(ctx context.Context, videoPath string) {
+	if videoPath == "" {
+		g.rescan = true // the watcher lost events
+		return
+	}
+	info, err := os.Lstat(videoPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return
+	}
+	mtime := info.ModTime()
+	if len(g.missing(videoPath, mtime)) == 0 {
+		return
+	}
+	if err := g.generate(ctx, videoPath, mtime); err != nil {
+		if ctx.Err() == nil {
+			g.failed[videoPath] = mtime
+			g.cfg.Debug("synology thumbnails: %s: %v", videoPath, err)
+		}
+		return
+	}
+	delete(g.failed, videoPath)
+	g.cfg.Debug("synology thumbnails: generated for new video %s", videoPath)
+}
+
+// drainEvents handles queued watcher events without blocking, so that a long
+// scan does not delay thumbnails for freshly uploaded videos.
+func (g *Generator) drainEvents(ctx context.Context) {
+	for {
 		select {
-		case <-ctx.Done():
+		case path := <-g.events:
+			g.handleEvent(ctx, path)
+		default:
 			return
-		case <-time.After(g.cfg.Interval):
 		}
 	}
 }
@@ -199,6 +257,7 @@ func (g *Generator) scanRoot(ctx context.Context, root string, stats *Stats) {
 			return nil
 		}
 		stats.Videos++
+		g.drainEvents(ctx)
 		g.process(ctx, path, info, stats)
 		return nil
 	})
