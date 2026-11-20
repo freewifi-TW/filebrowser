@@ -259,3 +259,79 @@ jobs:
             --target "${GITHUB_SHA}" \
             --title "FileBrowser Quantum ${{ matrix.tag }} for Synology (build ${GITHUB_RUN_NUMBER})" \
             --notes-file ../notes.md ${prerelease}
+
+  catalog:
+    name: Update Package Center source
+    # A static "package source" for DSM (Package Center > Settings > Package Sources),
+    # published on the gh-pages branch. One file per CPU family and channel because a
+    # static host cannot filter by the architecture DSM sends in its query.
+    needs: [resolve, build]
+    if: always() && needs.resolve.result == 'success' && needs.build.result != 'failure' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: frontend/public/img/icons
+      - name: Generate catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          owner="$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          site_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          mkdir -p site dl
+          touch site/.nojekyll
+          command -v convert > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq imagemagick; }
+          for size in 72 120; do
+            convert frontend/public/img/icons/favicon.png -resize "${size}x${size}" "site/icon_${size}.png"
+          done
+
+          tags="$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate --jq '.[] | select(.draft | not) | .tag_name')"
+          for channel in stable beta; do
+            tag="$(echo "${tags}" | grep -E "^v[0-9.]+-${channel}-syno\.[0-9]+$" | sort -V | tail -n1 || true)"
+            [ -n "${tag}" ] || { echo "no ${channel} release yet"; continue; }
+            rm -rf dl/* && gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" --dir dl --pattern '*.spk'
+            for arch in x86_64 aarch64; do
+              spk="$(ls dl/FileBrowserQuantum-${arch}-*.spk | grep -v portonly | head -n1)"
+              name="$(basename "${spk}")"
+              version="${name#FileBrowserQuantum-${arch}-}"; version="${version%.spk}"
+              prefix=""; [ "${channel}" = "stable" ] || prefix="beta-"
+              jq -n \
+                --arg version "${version}" \
+                --arg desc "FileBrowser Quantum ${tag%-syno.*}: web file manager with bundled FFmpeg. Writes video thumbnails for File Station, Synology Drive and Synology Photos." \
+                --arg link "https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/${name}" \
+                --arg md5 "$(md5sum "${spk}" | cut -d' ' -f1)" \
+                --argjson size "$(stat -c %s "${spk}")" \
+                --arg changelog "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" \
+                --arg t72 "${site_url}/icon_72.png" --arg t120 "${site_url}/icon_120.png" \
+                '{packages: [{
+                    package: "FileBrowserQuantum", version: $version, dname: "FileBrowser Quantum",
+                    desc: $desc, link: $link, md5: $md5, size: $size, changelog: $changelog,
+                    thumbnail: [$t72, $t120],
+                    maintainer: "FileBrowser Quantum (community Synology package)",
+                    maintainer_url: "https://github.com/gtsteffaniak/filebrowser",
+                    qinst: true, qupgrade: true, qstart: true, beta: false,
+                    os_min_ver: "7.2-64561", deppkgs: null, conflictpkgs: null
+                 }]}' > "site/${prefix}${arch}.json"
+              echo "${prefix}${arch}.json -> ${name}" | tee -a "${GITHUB_STEP_SUMMARY}"
+            done
+          done
+
+      - name: Publish to gh-pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "${remote}" gh-pages > /dev/null; then
+            git clone -q --depth 1 --branch gh-pages "${remote}" pages
+          else
+            mkdir pages && git -C pages init -q -b gh-pages && git -C pages remote add origin "${remote}"
+          fi
+          cp -a site/. pages/
+          cd pages
+          git add -A
+          if git diff --cached --quiet; then echo "catalog unchanged"; exit 0; fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Update Synology package source"
+          git push -q origin gh-pages
