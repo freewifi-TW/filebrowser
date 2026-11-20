@@ -157,8 +157,9 @@ jobs:
             go build -tags analytics,mupdf,musl -ldflags "${ldflags}" -o "${GITHUB_WORKSPACE}/dist/arm64/filebrowser" .
           file "${GITHUB_WORKSPACE}"/dist/*/filebrowser
           # Synology uses glibc; a musl binary only runs there when it is fully static.
+          # (A static binary has no PT_INTERP program header, i.e. needs no dynamic loader.)
           for f in "${GITHUB_WORKSPACE}"/dist/*/filebrowser; do
-            file "${f}" | grep -q "statically linked" || { echo "::error::${f} is not statically linked"; exit 1; }
+            if readelf -lW "${f}" | grep -q INTERP; then echo "::error::${f} is not statically linked"; exit 1; fi
           done
 
       - uses: docker/setup-qemu-action@v3
@@ -173,7 +174,13 @@ jobs:
             docker cp "${id}:/ffprobe" "dist/${arch}/ffprobe"
             docker rm "${id}" > /dev/null
             chmod 755 dist/${arch}/*
-            file "dist/${arch}/ffmpeg" | grep -q "statically linked" || { echo "::error::ffmpeg (${arch}) is not statically linked"; exit 1; }
+            for b in ffmpeg ffprobe; do
+              echo "::notice::${arch} ${b}: $(file -b "dist/${arch}/${b}" | cut -c1-160)"
+              if readelf -lW "dist/${arch}/${b}" | grep -q INTERP; then
+                echo "::error::${b} (${arch}) needs a dynamic loader: $(readelf -lW "dist/${arch}/${b}" | grep -A1 INTERP | tail -n1 | tr -s ' ')"
+                exit 1
+              fi
+            done
           done
 
       - name: Test thumbnail generator with the bundled ffmpeg
